@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>隱私保護升級版 - Teachable Machine</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; margin-bottom: 20px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; }
+        canvas { border: 2px solid #ccc; border-radius: 10px; margin-bottom: 10px; }
+        #label-container div { font-size: 18px; margin: 5px 0; font-weight: bold; }
+        .status { color: #d9534f; font-weight: bold; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Teachable Machine (含即時人像模糊防護)</h1>
+    <p>系統已啟用隱私防護，若偵測到人臉將自動套用高斯模糊處理。</p>
+    
+    <button type="button" onclick="init()" id="start-btn">啟動安全防護鏡頭</button>
+    <div id="loading" class="status"></div>
+    
+    <!-- 改用 Canvas 來繪製經過模糊處理的畫面 -->
+    <div>
+        <canvas id="display-canvas"></canvas>
+    </div>
+    <div id="label-container"></div>
+
+    <!-- 依序載入 TF.js核心、BlazeFace(人臉偵測)、Teachable Machine -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+    
+    <script type="text/javascript">
+        const URL = "./my_model/"; // 替換為你的模型資料夾
+        let model, faceModel, webcam, labelContainer, maxPredictions;
+        let canvas, ctx;
+        const width = 300;
+        const height = 300;
+
+        async function init() {
+            document.getElementById("start-btn").style.display = "none";
+            document.getElementById("loading").innerText = "模型載入中，請稍候...";
+
+            // 1. 同時載入 Teachable Machine 與 BlazeFace 兩個 AI 模型
+            const modelURL = URL + "model.json";
+            const metadataURL = URL + "metadata.json";
+            
+            try {
+                [model, faceModel] = await Promise.all([
+                    tmImage.load(modelURL, metadataURL),
+                    blazeface.load()
+                ]);
+                maxPredictions = model.getTotalClasses();
+            } catch (error) {
+                alert("模型載入失敗，請檢查路徑與伺服器設定。");
+                return;
+            }
+
+            // 2. 初始化視訊鏡頭
+            webcam = new tmImage.Webcam(width, height, true); // true 為水平翻轉
+            await webcam.setup();
+            await webcam.play();
+
+            // 3. 設定用於處理模糊的畫布 (Canvas)
+            canvas = document.getElementById("display-canvas");
+            canvas.width = width;
+            canvas.height = height;
+            ctx = canvas.getContext("2d");
+
+            // 初始化結果標籤
+            labelContainer = document.getElementById("label-container");
+            labelContainer.innerHTML = "";
+            for (let i = 0; i < maxPredictions; i++) {
+                labelContainer.appendChild(document.createElement("div"));
+            }
+
+            document.getElementById("loading").innerText = "隱私防護已啟用";
+            window.requestAnimationFrame(loop);
+        }
+
+        async function loop() {
+            webcam.update(); // 取得新畫面
+            await processPrivacyAndPredict(); // 執行模糊與預測
+            window.requestAnimationFrame(loop);
+        }
+
+        async function processPrivacyAndPredict() {
+            // A. 將原始畫面畫到畫布上
+            ctx.drawImage(webcam.canvas, 0, 0, width, height);
+
+            // B. 偵測畫布上是否有人臉
+            const returnTensors = false;
+            const predictions = await faceModel.estimateFaces(webcam.canvas, returnTensors);
+
+            // C. 若偵測到人員，針對該區域套用高斯模糊
+            if (predictions.length > 0) {
+                for (let i = 0; i < predictions.length; i++) {
+                    const start = predictions[i].topLeft;
+                    const end = predictions[i].bottomRight;
+                    const faceWidth = end[0] - start[0];
+                    const faceHeight = end[1] - start[1];
+                    
+                    // 擴大模糊範圍以確保隱私 (向外延伸 20%)
+                    const paddingX = faceWidth * 0.2;
+                    const paddingY = faceHeight * 0.2;
+
+                    ctx.save();
+                    ctx.beginPath();
+                    // 圈出人臉範圍
+                    ctx.rect(
+                        start[0] - paddingX, 
+                        start[1] - paddingY * 2, 
+                        faceWidth + paddingX * 2, 
+                        faceHeight + paddingY * 3
+                    );
+                    ctx.clip(); // 限制後續的繪製只在此範圍內
+
+                    // 套用高斯模糊濾鏡並重繪該區塊
+                    ctx.filter = 'blur(15px)';
+                    ctx.drawImage(webcam.canvas, 0, 0, width, height);
+                    ctx.restore(); // 恢復畫布狀態，以免影響下一幀
+                }
+            }
+
+            // D. 將「已經過模糊處理」的安全畫布 (canvas) 送交 Teachable Machine 預測
+            const tmPrediction = await model.predict(canvas);
+            
+            for (let i = 0; i < maxPredictions; i++) {
+                const classPrediction = 
+                    tmPrediction[i].className + ": " + (tmPrediction[i].probability * 100).toFixed(0) + "%";
+                labelContainer.childNodes[i].innerHTML = classPrediction;
+            }
+        }
+    </script>
+</body>
+</html>
